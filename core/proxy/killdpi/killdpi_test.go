@@ -26,6 +26,33 @@ func newTestUser(t *testing.T, cipher string) (*protocol.MemoryUser, *MemoryAcco
 	return &protocol.MemoryUser{Email: "t@test", Account: ma}, ma
 }
 
+// tcpPair returns two ends of a real loopback TCP connection (net.Pipe is
+// synchronous and would deadlock on the 0-RTT flight).
+func tcpPair(t testing.TB) (net.Conn, net.Conn) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() { c, err := l.Accept(); ch <- res{c, err} }()
+	c, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := <-ch
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	t.Cleanup(func() { c.Close(); r.c.Close() })
+	return c, r.c
+}
+
 // runHandshake performs a full client/server handshake over an in-memory pipe
 // and returns both encrypted ends plus the decoded hello.
 func runHandshake(t *testing.T, cipher string) (*FrameConn, *FrameConn, *Hello) {
@@ -42,7 +69,7 @@ func runHandshake(t *testing.T, cipher string) (*FrameConn, *FrameConn, *Hello) 
 		t.Fatal(err)
 	}
 
-	c, s := net.Pipe()
+	c, s := tcpPair(t)
 	type sres struct {
 		r   *ServerResult
 		err error
@@ -133,7 +160,7 @@ func TestWrongUserRejected(t *testing.T) {
 	pk, _ := ParsePublicKey(pub)
 	_, acc := newTestUser(t, "")
 	v := new(MemoryValidator) // empty: no users
-	c, s := net.Pipe()
+	c, s := tcpPair(t)
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := ServerHandshake(s, s, sk, v, nil, DefaultTimeWindow, 0, 0)
@@ -156,7 +183,7 @@ func TestWrongServerKeyRejected(t *testing.T) {
 	user, acc := newTestUser(t, "")
 	v := new(MemoryValidator)
 	v.Add(user)
-	c, s := net.Pipe()
+	c, s := tcpPair(t)
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := ServerHandshake(s, s, sk, v, nil, DefaultTimeWindow, 0, 0)
@@ -179,7 +206,7 @@ func TestReplayRejected(t *testing.T) {
 
 	// Capture a genuine first flight.
 	var captured bytes.Buffer
-	c, s := net.Pipe()
+	c, s := tcpPair(t)
 	go func() { io.Copy(&captured, s) }()
 	cs, err := ClientHandshake(c, pk, acc, &Hello{Command: CommandTCP, Address: xnet.LocalHostIP, Port: 80})
 	if err != nil {
@@ -190,13 +217,13 @@ func TestReplayRejected(t *testing.T) {
 	_ = cs
 
 	// First delivery accepted.
-	s1c, s1s := net.Pipe()
+	s1c, s1s := tcpPair(t)
 	go func() { s1c.Write(captured.Bytes()); io.Copy(io.Discard, s1c) }()
 	if _, err := ServerHandshake(s1s, s1s, sk, v, replay, DefaultTimeWindow, 0, 0); err != nil {
 		t.Fatal("first flight should be accepted:", err)
 	}
 	// Replay rejected.
-	s2c, s2s := net.Pipe()
+	s2c, s2s := tcpPair(t)
 	go func() { s2c.Write(captured.Bytes()); io.Copy(io.Discard, s2c) }()
 	if _, err := ServerHandshake(s2s, s2s, sk, v, replay, DefaultTimeWindow, 0, 0); err == nil {
 		t.Fatal("replayed flight must be rejected")
@@ -205,27 +232,14 @@ func TestReplayRejected(t *testing.T) {
 
 func TestTamperedFrameRejected(t *testing.T) {
 	cc, sc, _ := runHandshake(t, CipherAES256GCM)
-	raw := cc.Conn // underlying pipe
-	go func() {
-		// Build a legit frame then flip a byte of it on the wire.
-		var sink bytes.Buffer
-		mc := NewFrameConn(&writerConn{Conn: raw, w: &sink}, CipherAES256GCM)
-		_ = mc
-		// Simpler: write random garbage; it must fail authentication.
-		raw.Write(make([]byte, 60))
-	}()
+	raw := cc.Conn // underlying transport
+	// Random garbage must fail authentication (any flipped bit does too).
+	go raw.Write(make([]byte, 60))
 	buf := make([]byte, 10)
 	if _, err := sc.Read(buf); err == nil {
 		t.Fatal("garbage must not decrypt")
 	}
 }
-
-type writerConn struct {
-	net.Conn
-	w io.Writer
-}
-
-func (w *writerConn) Write(b []byte) (int, error) { return w.w.Write(b) }
 
 func TestParsePadding(t *testing.T) {
 	if _, _, err := ParsePadding("10-5"); err == nil {
@@ -241,7 +255,7 @@ func BenchmarkFrameThroughput(b *testing.B) {
 		b.Run(cipher, func(b *testing.B) {
 			key := make([]byte, 32)
 			rand.Read(key)
-			c, s := net.Pipe()
+			c, s := tcpPair(b)
 			fcW := NewFrameConn(c, cipher)
 			fcR := NewFrameConn(s, cipher)
 			fcW.SetEncryptKey(key)
