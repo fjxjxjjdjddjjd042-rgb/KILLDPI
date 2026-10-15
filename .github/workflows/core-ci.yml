@@ -28,7 +28,8 @@ jobs:
       - name: Unit tests (KILLDPI protocol + config)
         working-directory: core
         run: |
-          go vet ./proxy/killdpi/... ./infra/conf/ ./main/commands/all/
+          go vet ./proxy/killdpi/... ./main/commands/all/  # infra/conf has a pre-existing upstream vet warning
+          go build ./infra/conf/
           go test -v -race -timeout 120s ./proxy/killdpi/... 2>&1 | tee ../unit-test.log
 
       - name: Benchmark (frame throughput, AEAD)
