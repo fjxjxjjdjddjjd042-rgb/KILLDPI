@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package xray.proxy.killdpi.outbound;
+option csharp_namespace = "Xray.Proxy.Killdpi.Outbound";
+option go_package = "github.com/xtls/xray-core/proxy/killdpi/outbound";
+option java_package = "com.xray.proxy.killdpi.outbound";
+option java_multiple_files = true;
+
+import "common/protocol/server_spec.proto";
+
+message Config {
+  xray.common.protocol.ServerEndpoint vnext = 1;
+  // Server static X25519 public key, base64 RawURL.
+  string public_key = 2;
+  // Keep-alive ping interval in seconds (0 = disabled).
+  uint32 keepalive = 3;
+}

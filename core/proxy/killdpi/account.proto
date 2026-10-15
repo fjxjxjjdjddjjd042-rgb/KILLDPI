@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package xray.proxy.killdpi;
+option csharp_namespace = "Xray.Proxy.Killdpi";
+option go_package = "github.com/xtls/xray-core/proxy/killdpi";
+option java_package = "com.xray.proxy.killdpi";
+option java_multiple_files = true;
+
+// Account holds the per-user credentials of the KILLDPI protocol.
+message Account {
+  // UUID of the user, e.g. "66ad4540-b58c-4ad2-9926-ea63445a9b57".
+  string id = 1;
+  // Cipher: "chacha20-poly1305" (default) or "aes-256-gcm".
+  string cipher = 2;
+  // Padding policy for the handshake, "min-max" bytes, e.g. "64-512".
+  string padding = 3;
+}

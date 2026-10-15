@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package xray.proxy.killdpi.inbound;
+option csharp_namespace = "Xray.Proxy.Killdpi.Inbound";
+option go_package = "github.com/xtls/xray-core/proxy/killdpi/inbound";
+option java_package = "com.xray.proxy.killdpi.inbound";
+option java_multiple_files = true;
+
+import "common/protocol/user.proto";
+
+message Fallback {
+  string name = 1;
+  string alpn = 2;
+  string path = 3;
+  string type = 4;
+  string dest = 5;
+  uint64 xver = 6;
+}
+
+message Config {
+  repeated xray.common.protocol.User users = 1;
+  // Server static X25519 private key, base64 RawURL.
+  string private_key = 2;
+  // Allowed clock skew in seconds for replay protection (default 120).
+  uint32 time_window = 3;
+  repeated Fallback fallbacks = 4;
+}

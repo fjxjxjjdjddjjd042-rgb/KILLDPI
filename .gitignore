@@ -1,0 +1,11 @@
+node_modules/
+*.log
+*.tar.gz
+*.zip
+*.apk
+.env
+.dev.vars
+core/xray
+core/xray-*
+bot/data/*.tmp
+__pycache__/
