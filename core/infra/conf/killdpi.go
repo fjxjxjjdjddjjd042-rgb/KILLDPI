@@ -72,7 +72,7 @@ func (c *KillDPIInboundConfig) Build() (proto.Message, error) {
 		if err := json.Unmarshal(rawUser, account); err != nil {
 			return nil, errors.New(`KILLDPI clients: invalid user`).Base(err)
 		}
-		u, err := uuid.ParseString(account.Id)
+		u, err := parseStrictUUID(account.Id)
 		if err != nil {
 			return nil, errors.New(`KILLDPI clients: invalid "id"`).Base(err)
 		}
@@ -198,7 +198,7 @@ func (c *KillDPIOutboundConfig) Build() (proto.Message, error) {
 		}
 		c.Address = rec.Address // for transport-security validation
 	}
-	u, err := uuid.ParseString(account.Id)
+	u, err := parseStrictUUID(account.Id)
 	if err != nil {
 		return nil, errors.New(`KILLDPI users: invalid "id"`).Base(err)
 	}
@@ -213,4 +213,14 @@ func (c *KillDPIOutboundConfig) Build() (proto.Message, error) {
 	spec.User = user
 	config.Vnext = spec
 	return config, nil
+}
+
+// parseStrictUUID accepts only canonical 8-4-4-4-12 UUIDs. (Xray's
+// uuid.ParseString maps arbitrary strings to UUIDv5, which would silently
+// accept typos in a credential.)
+func parseStrictUUID(s string) (uuid.UUID, error) {
+	if len(s) != 36 {
+		return uuid.UUID{}, errors.New("must be a 36-character UUID like 8-4-4-4-12, got: " + s)
+	}
+	return uuid.ParseString(s)
 }

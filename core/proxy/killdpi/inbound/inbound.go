@@ -159,29 +159,38 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	if err != nil {
 		return err
 	}
+	// Keep an untouched copy of the first flight so a failed handshake can be
+	// replayed byte-for-byte to the fallback destination.
+	firstCopy := buf.New()
+	firstCopy.Write(first.Bytes())
 	reader := &buf.BufferedReader{
 		Reader: buf.NewReader(connection),
 		Buffer: buf.MultiBuffer{first},
 	}
 
-	account0 := killdpi.DefaultPaddingMin
-	account1 := killdpi.DefaultPaddingMax
 	var result *killdpi.ServerResult
 	if h.fallbacks != nil && firstLen < killdpi.ClientPrefixLen+2+16 {
 		err = errors.New("first flight too short, fallback directly")
 	} else {
-		result, err = killdpi.ServerHandshake(connection, reader, h.privateKey, h.validator, h.replay, h.timeWindow, account0, account1)
+		result, err = killdpi.ServerHandshake(connection, reader, h.privateKey, h.validator, h.replay, h.timeWindow,
+			killdpi.DefaultPaddingMin, killdpi.DefaultPaddingMax)
 	}
 	if err != nil {
 		if h.fallbacks != nil {
-			return h.doFallback(ctx, connection, iConn, reader, sessionPolicy, err)
+			fbReader := &buf.BufferedReader{
+				Reader: buf.NewReader(connection),
+				Buffer: buf.MultiBuffer{firstCopy},
+			}
+			return h.doFallback(ctx, connection, iConn, fbReader, sessionPolicy, err)
 		}
+		firstCopy.Release()
 		if errors.Cause(err) != io.EOF {
 			log.Record(&log.AccessMessage{From: connection.RemoteAddr(), To: "", Status: log.AccessRejected, Reason: err})
 			err = errors.New("invalid request from ", connection.RemoteAddr()).Base(err)
 		}
 		return err
 	}
+	firstCopy.Release()
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
 		errors.LogWarningInner(ctx, err, "unable to set back read deadline")
 	}

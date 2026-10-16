@@ -32,6 +32,8 @@ d=json.load(open('cert.json'))
 open('cert.pem','w').write("\n".join(d['certificate'])+"\n")
 open('key.pem','w').write("\n".join(d['key'])+"\n")
 EOF
+CERT_HASH=$("$XRAY" tls hash --cert cert.pem | awk '/Leaf SHA256/{print $3}')
+log "cert pin: $CERT_HASH"
 
 # ---------- backend echo/http servers ----------
 cat > backend.py <<'EOF'
@@ -270,13 +272,13 @@ stop_pair raw
 # ===================== 2. TLS =====================
 mk_cfgs tls 10002 11004 \
  "{\"network\":\"tcp\",\"security\":\"tls\",\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$WORK/cert.pem\",\"keyFile\":\"$WORK/key.pem\"}]}}" \
- '{"network":"tcp","security":"tls","tlsSettings":{"serverName":"killdpi.test","allowInsecure":true,"fingerprint":"chrome"}}'
+ '{"network":"tcp","security":"tls","tlsSettings":{"serverName":"killdpi.test","pinnedPeerCertSha256":"'$CERT_HASH'","fingerprint":"chrome"}}'
 start_pair tls; run_suite "tls" 11004; stop_pair tls
 
 # ===================== 3. WebSocket + TLS =====================
 mk_cfgs ws 10003 11005 \
  "{\"network\":\"ws\",\"wsSettings\":{\"path\":\"/killdpi\"},\"security\":\"tls\",\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$WORK/cert.pem\",\"keyFile\":\"$WORK/key.pem\"}]}}" \
- '{"network":"ws","wsSettings":{"path":"/killdpi","host":"killdpi.test"},"security":"tls","tlsSettings":{"serverName":"killdpi.test","allowInsecure":true,"fingerprint":"chrome"}}'
+ '{"network":"ws","wsSettings":{"path":"/killdpi","host":"killdpi.test"},"security":"tls","tlsSettings":{"serverName":"killdpi.test","pinnedPeerCertSha256":"'$CERT_HASH'","fingerprint":"chrome"}}'
 start_pair ws; run_suite "ws-tls" 11005; stop_pair ws
 
 # ===================== 4. gRPC (bonus transport) =====================
