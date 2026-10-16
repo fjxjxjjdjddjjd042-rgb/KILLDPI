@@ -1,0 +1,54 @@
+name: telegram-bot
+
+# The bot long-polls for ~5.5 min then exits cleanly; the schedule relaunches it.
+# Loop guards:
+#   * concurrency group  -> never two pollers at once
+#   * no `push` trigger  -> commits made by the bot can't retrigger it
+#   * RUN_SECONDS + job timeout -> hard upper bound per run
+#   * repo variable BOT_ENABLED=false pauses the schedule
+on:
+  schedule:
+    - cron: "*/6 * * * *"
+  workflow_dispatch:
+    inputs:
+      run_seconds:
+        description: "How long to poll (seconds, max 340)"
+        default: "330"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    if: ${{ vars.BOT_ENABLED != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bot
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: bot/requirements.txt
+      - run: pip install -q -r bot/requirements.txt
+      - name: Offline self-tests
+        working-directory: bot
+        run: python test_bot_offline.py
+      - name: Run bot (secrets only from GitHub Actions secrets)
+        working-directory: bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          DATA_REPO: ${{ vars.DATA_REPO || github.repository }}
+          ADMIN_IDS: ${{ vars.ADMIN_IDS }}
+          RUN_SECONDS: ${{ github.event.inputs.run_seconds || '330' }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$GH_PAT" ]; then
+            echo "::error::Set repository secrets BOT_TOKEN and GH_PAT (Settings -> Secrets and variables -> Actions)."; exit 1; fi
+          python bot.py
