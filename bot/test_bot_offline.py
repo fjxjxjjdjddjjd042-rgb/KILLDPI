@@ -12,7 +12,7 @@ def test_link_roundtrip_all_profiles():
         p = PROFILES[k]
         c = KillDPIConfig(uuid=str(uuid.uuid4()), host="cdn.example.com" if p.use_cdn else "1.2.3.4", port=443,
                           pbk=PBK, cipher=p.cipher, network=p.network, security=p.security, sni="x.example.com",
-                          ws_host="cdn.example.com", path="/killdpi", padding=p.padding, keepalive=p.keepalive, name=p.title)
+                          ws_host="cdn.example.com" if p.network == "ws" else "", path="/killdpi" if p.network == "ws" else "", padding=p.padding, keepalive=p.keepalive, name=p.title)
         link = c.to_link()
         assert KillDPIConfig.from_link(link) == c, k
         ob = json.loads(c.to_client_json())["outbounds"][0]
