@@ -62,7 +62,7 @@ class H(http.server.BaseHTTPRequestHandler):
 def http_srv():
     socketserver.TCPServer.allow_reuse_address=True
     socketserver.ThreadingTCPServer(('127.0.0.1',9003),H).serve_forever()
-# HTTP 10MB download on 9004
+# HTTP 10MB download on 9004 (CPython backend caps ~100 Mbit/s; the echo test is the real throughput number)
 class Big(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         n=10*1024*1024
@@ -209,6 +209,7 @@ EOF
 
 run_suite() { # name
   local n=$1 cport=$2 r
+  python3() { timeout 60 /usr/bin/env python3 "$@"; }
   r=$(python3 probe.py tcp_echo "$cport" 1000000 2>&1);        [[ "$r" == OK ]] && ok "$n: TCP echo 1MB integrity" || bad "$n: TCP echo ($r)"
   r=$(python3 probe.py udp_echo "$cport" 2>&1);                [[ "$r" == "udp 20/20" || "$r" == "udp 19/20" ]] && ok "$n: UDP echo ($r)" || bad "$n: UDP echo ($r)"
   r=$(python3 probe.py tcp_latency "$cport" 2>&1);             ok "$n: TCP RTT ($r)"
@@ -221,13 +222,9 @@ run_suite() { # name
 
 # ===================== 1. RAW TCP =====================
 mk_cfgs raw 10001 11001 '{"network":"tcp"}' '{"network":"tcp"}'
-start_pair raw; run_suite "raw-tcp" 11001
+start_pair raw; [[ -z "${SKIP_RAW:-}" ]] && run_suite "raw-tcp" 11001
 
 # ---- wire-level check: first bytes must look random (no plaintext UUID / magic) ----
-python3 - <<EOF
-import socket,struct,sys
-# capture first flight by connecting to server and sending through client... simpler: sniff via a tiny tcp proxy
-EOF
 cat > sniff.py <<'EOF'
 import socket, threading, sys, math, collections
 # transparent TCP proxy 10010 -> 10001 capturing the first 2KB in each direction
@@ -257,7 +254,7 @@ sed "s/\"port\": 10001/\"port\": 10010/" client-raw.json > client-sniff.json
 sleep 1
 sed -i 's/11001/11002/' client-sniff.json; kill $SP; "$XRAY" run -c client-sniff.json > client-sniff.log 2>&1 & SP=$!
 sleep 1
-python3 probe.py tcp_echo 11002 5000 >/dev/null 2>&1; sleep 0.5; kill $SP 2>/dev/null; wait %"$(jobs -l | grep sniff.py | awk '{print $1}' | tr -d '[]+-')" 2>/dev/null
+timeout 20 python3 probe.py tcp_echo 11002 5000 >/dev/null 2>&1; sleep 1; kill $SP 2>/dev/null; sleep 1
 SN=$(cat sniff.out); log "wire: $SN"
 [[ "$SN" == *"uuid_in_clear=False"* && "$SN" == *"entropy=7."* ]] && ok "wire looks random, no plaintext UUID ($SN)" || bad "wire analysis ($SN)"
 
@@ -265,7 +262,7 @@ SN=$(cat sniff.out); log "wire: $SN"
 sed "s/$UUID/00000000-0000-4000-8000-000000000000/" client-raw.json | sed 's/11001/11003/' > client-bad.json
 "$XRAY" run -c client-bad.json > client-bad.log 2>&1 & BP=$!
 sleep 1
-r=$(python3 probe.py tcp_echo 11003 100 2>&1 | tail -1); kill $BP
+r=$(timeout 15 python3 probe.py tcp_echo 11003 100 2>&1 | tail -1); kill $BP
 [[ "$r" != OK ]] && ok "wrong UUID rejected by server" || bad "wrong UUID accepted!"
 grep -q "unknown user" server-raw.log && ok "server logged rejection reason" || log "note: rejection reason not in log at loglevel warning"
 stop_pair raw
@@ -286,13 +283,13 @@ start_pair ws; run_suite "ws-tls" 11005; stop_pair ws
 mk_cfgs grpc 10004 11006 \
  '{"network":"grpc","grpcSettings":{"serviceName":"kd"}}' \
  '{"network":"grpc","grpcSettings":{"serviceName":"kd"}}'
-start_pair grpc; r=$(python3 probe.py tcp_echo 11006 300000 2>&1); [[ "$r" == OK ]] && ok "grpc: TCP echo 300KB" || bad "grpc: ($r)"; stop_pair grpc
+start_pair grpc; r=$(timeout 60 python3 probe.py tcp_echo 11006 300000 2>&1); [[ "$r" == OK ]] && ok "grpc: TCP echo 300KB" || bad "grpc: ($r)"; stop_pair grpc
 
 # ===================== 5. Fallback (active-probe resistance) =====================
 mk_cfgs fb 10005 11007 '{"network":"tcp"}' '{"network":"tcp"}' ', "fallbacks": [{"dest": 9003}]'
 start_pair fb
 r=$(curl -s --max-time 5 http://127.0.0.1:10005/); [[ "$r" == "FALLBACK-OK" ]] && ok "fallback: plain HTTP probe sees web server" || bad "fallback: got '$r'"
-r=$(python3 probe.py tcp_echo 11007 50000 2>&1); [[ "$r" == OK ]] && ok "fallback: real client still works" || bad "fallback: client ($r)"
+r=$(timeout 30 python3 probe.py tcp_echo 11007 50000 2>&1); [[ "$r" == OK ]] && ok "fallback: real client still works" || bad "fallback: client ($r)"
 stop_pair fb
 
 # ===================== 6. Recovery after server restart =====================
@@ -300,9 +297,9 @@ mk_cfgs rec 10006 11008 '{"network":"tcp"}' '{"network":"tcp"}'
 start_pair rec
 r=$(python3 probe.py tcp_echo 11008 1000 2>&1); [[ "$r" == OK ]] || bad "recovery: pre-check"
 kill "$(cat server-rec.pid)"; sleep 0.5
-r=$(python3 probe.py tcp_echo 11008 1000 2>&1 | tail -1); [[ "$r" != OK ]] && log "recovery: during outage correctly failed ($r)"
+r=$(timeout 10 python3 probe.py tcp_echo 11008 1000 2>&1 | tail -1); [[ "$r" != OK ]] && log "recovery: during outage correctly failed ($r)"
 "$XRAY" run -c server-rec.json > server-rec2.log 2>&1 & echo $! > server-rec.pid
-T0=$(date +%s%N); for i in $(seq 1 30); do r=$(python3 probe.py tcp_echo 11008 1000 2>&1 | tail -1); [[ "$r" == OK ]] && break; sleep 0.2; done
+T0=$(date +%s%N); for i in $(seq 1 30); do r=$(timeout 10 python3 probe.py tcp_echo 11008 1000 2>&1 | tail -1); [[ "$r" == OK ]] && break; sleep 0.2; done
 DT=$(( ($(date +%s%N)-T0)/1000000 ))
 [[ "$r" == OK ]] && ok "recovery: client reconnected after server restart in ${DT}ms (no client restart)" || bad "recovery: failed"
 stop_pair rec
