@@ -207,24 +207,25 @@ func TestReplayRejected(t *testing.T) {
 	// Capture a genuine first flight.
 	var captured bytes.Buffer
 	c, s := tcpPair(t)
-	go func() { io.Copy(&captured, s) }()
-	cs, err := ClientHandshake(c, pk, acc, &Hello{Command: CommandTCP, Address: xnet.LocalHostIP, Port: 80})
-	if err != nil {
+	done := make(chan struct{})
+	go func() { io.Copy(&captured, s); close(done) }()
+	if _, err := ClientHandshake(c, pk, acc, &Hello{Command: CommandTCP, Address: xnet.LocalHostIP, Port: 80}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
 	c.Close()
-	_ = cs
+	<-done // io.Copy finished: captured is now safe to read
+	flight := captured.Bytes()
 
 	// First delivery accepted.
 	s1c, s1s := tcpPair(t)
-	go func() { s1c.Write(captured.Bytes()); io.Copy(io.Discard, s1c) }()
+	go func() { s1c.Write(flight); io.Copy(io.Discard, s1c) }()
 	if _, err := ServerHandshake(s1s, s1s, sk, v, replay, DefaultTimeWindow, 0, 0); err != nil {
 		t.Fatal("first flight should be accepted:", err)
 	}
 	// Replay rejected.
 	s2c, s2s := tcpPair(t)
-	go func() { s2c.Write(captured.Bytes()); io.Copy(io.Discard, s2c) }()
+	go func() { s2c.Write(flight); io.Copy(io.Discard, s2c) }()
 	if _, err := ServerHandshake(s2s, s2s, sk, v, replay, DefaultTimeWindow, 0, 0); err == nil {
 		t.Fatal("replayed flight must be rejected")
 	}
