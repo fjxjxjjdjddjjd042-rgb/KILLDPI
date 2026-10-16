@@ -1,0 +1,168 @@
+name: android-apk
+
+# Builds the KILLDPI Android client (v2rayNG fork) for arm64-v8a:
+#   1. libv2ray.aar from AndroidLibXrayLite with xray-core REPLACED by ./core (KILLDPI build)
+#   2. v2rayNG patched by android/patch_v2rayng.py
+#   3. fdroid flavour, arm64-v8a only, signed with a CI-generated keystore
+#      (set secrets APP_KEYSTORE_BASE64 / APP_KEYSTORE_PASSWORD / APP_KEYSTORE_ALIAS / APP_KEY_PASSWORD to use your own key)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['android/**', 'core/proxy/killdpi/**', 'core/infra/conf/killdpi.go', '.github/workflows/android.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  V2RAYNG_REF: master
+  LIBXRAY_REF: main
+
+jobs:
+  aar:
+    name: libv2ray.aar (KILLDPI core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: 2dust/AndroidLibXrayLite
+          ref: ${{ env.LIBXRAY_REF }}
+          path: AndroidLibXrayLite
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+      - uses: android-actions/setup-android@v4
+        with:
+          log-accepted-android-sdk-licenses: false
+          cmdline-tools-version: '14742923'
+          packages: 'platforms;android-35 build-tools;35.0.0 platform-tools'
+      - name: Install NDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --channel=0 --install "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> $GITHUB_ENV
+      - name: Point AndroidLibXrayLite at KILLDPI core
+        working-directory: AndroidLibXrayLite
+        run: |
+          go mod edit -replace github.com/xtls/xray-core=../core
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+      - name: Build AAR (arm64 only)
+        working-directory: AndroidLibXrayLite
+        run: |
+          mkdir -p assets data
+          bash gen_assets.sh download
+          cp -v data/*.dat assets/ || true
+          gomobile init
+          go mod tidy
+          gomobile bind -v -target=android/arm64 -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
+          ls -la libv2ray*.aar
+          unzip -o -q libv2ray.aar -d aar_x && (strings aar_x/jni/arm64-v8a/libgojni.so | grep -q "proxy/killdpi" && echo "KILLDPI symbols present" || (echo "::error::killdpi not linked"; exit 1))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libv2ray-aar
+          path: AndroidLibXrayLite/libv2ray*.aar
+          retention-days: 7
+
+  apk:
+    name: KILLDPI APK (arm64-v8a)
+    needs: aar
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: 2dust/v2rayNG
+          ref: ${{ env.V2RAYNG_REF }}
+          path: v2rayNG
+          submodules: recursive
+          fetch-depth: 0
+      - name: Apply KILLDPI patch
+        run: |
+          python3 android/patch_v2rayng.py v2rayNG
+          cd v2rayNG && git diff --stat
+      - uses: actions/download-artifact@v4
+        with:
+          name: libv2ray-aar
+          path: v2rayNG/V2rayNG/app/libs/
+      - uses: android-actions/setup-android@v4
+        with:
+          log-accepted-android-sdk-licenses: false
+          cmdline-tools-version: '14742923'
+          packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+      - name: Install NDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --channel=0 --install "ndk;30.0.16248370"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
+          sed -i '10i\
+          \
+              ndkVersion = "30.0.16248370"' v2rayNG/V2rayNG/app/build.gradle.kts
+      - name: Restore cached libhevtun
+        id: cache-hev
+        uses: actions/cache/restore@v4
+        with:
+          path: v2rayNG/libs
+          key: libhevtun-${{ runner.os }}-${{ hashFiles('v2rayNG/.git/modules/hev-socks5-tunnel/HEAD', 'v2rayNG/compile-hevtun.sh') }}
+      - name: Build libhevtun (tun2socks)
+        if: steps.cache-hev.outputs.cache-hit != 'true'
+        working-directory: v2rayNG
+        run: bash compile-hevtun.sh
+      - uses: actions/cache/save@v4
+        if: steps.cache-hev.outputs.cache-hit != 'true'
+        with:
+          path: v2rayNG/libs
+          key: libhevtun-${{ runner.os }}-${{ hashFiles('v2rayNG/.git/modules/hev-socks5-tunnel/HEAD', 'v2rayNG/compile-hevtun.sh') }}
+      - run: cp -r v2rayNG/libs v2rayNG/V2rayNG/app/
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Keystore (user secret or CI-generated)
+        id: ks
+        env:
+          KS_B64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/ks.jks"
+            echo "pass=${{ secrets.APP_KEYSTORE_PASSWORD }}" >> $GITHUB_OUTPUT
+            echo "alias=${{ secrets.APP_KEYSTORE_ALIAS }}" >> $GITHUB_OUTPUT
+            echo "keypass=${{ secrets.APP_KEY_PASSWORD }}" >> $GITHUB_OUTPUT
+          else
+            keytool -genkeypair -v -keystore "$RUNNER_TEMP/ks.jks" -storepass killdpi-ci -keypass killdpi-ci \
+              -alias killdpi -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=KILLDPI CI, O=KILLDPI"
+            echo "pass=killdpi-ci" >> $GITHUB_OUTPUT; echo "alias=killdpi" >> $GITHUB_OUTPUT; echo "keypass=killdpi-ci" >> $GITHUB_OUTPUT
+            echo "::notice::APK signed with a CI-generated throwaway key. Set APP_KEYSTORE_* secrets for a stable signature."
+          fi
+      - name: Build APK (fdroid, arm64-v8a)
+        working-directory: v2rayNG/V2rayNG
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          chmod +x gradlew
+          ./gradlew --no-daemon licenseFdroidReleaseReport || true
+          ./gradlew --no-daemon assembleFdroidRelease -PABI_FILTERS=arm64-v8a \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/ks.jks" \
+            -Pandroid.injected.signing.store.password="${{ steps.ks.outputs.pass }}" \
+            -Pandroid.injected.signing.key.alias="${{ steps.ks.outputs.alias }}" \
+            -Pandroid.injected.signing.key.password="${{ steps.ks.outputs.keypass }}"
+          mkdir -p ../../out
+          find app/build/outputs/apk -name '*arm64-v8a*.apk' -exec cp -v {} ../../out/ \;
+          cd ../../out && for f in *.apk; do mv "$f" "KILLDPI-$(echo $f | sed 's/v2rayNG_//')"; done; ls -la; sha256sum *.apk > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KILLDPI-android-arm64-v8a
+          path: out/
+          retention-days: 30
+      - name: Release
+        if: github.ref == 'refs/heads/main'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          TAG="android-build-${{ github.run_number }}"
+          gh release create "$TAG" out/* --title "KILLDPI Android $TAG (arm64-v8a)" \
+            --notes "v2rayNG fork with KILLDPI protocol; Xray-core replaced by KILLDPI core. Commit ${{ github.sha }}. Signed with CI key unless APP_KEYSTORE_* secrets are set." || true
